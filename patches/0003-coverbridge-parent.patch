@@ -1,0 +1,231 @@
+diff --git a/Makefile.in b/Makefile.in
+index c70a1a2..be3ec93 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -98,15 +98,19 @@ MANUALS=nsd.8 nsd-checkconf.8 nsd-checkzone.8 nsd-control.8 nsd.conf.5
+ COMMON_OBJ=answer.o axfr.o ixfr.o ixfrcreate.o buffer.o configlexer.o configparser.o dname.o dns.o edns.o iterated_hash.o lookup3.o namedb.o nsec3.o options.o packet.o query.o rbtree.o radtree.o rdata.o region-allocator.o rrl.o siphash.o tsig.o tsig-openssl.o udb.o util.o bitset.o popen3.o proxy_protocol.o
+ XFRD_OBJ=xfrd-catalog-zones.o xfrd-disk.o xfrd-notify.o xfrd-tcp.o xfrd.o remote.o metrics.o $(DNSTAP_OBJ)
+ XDP_OBJ=xdp-server.o xdp-util.o
+-NSD_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) difffile.o ipc.o mini_event.o netio.o nsd.o server.o dbaccess.o dbcreate.o zonec.o verify.o fuzzer.o
+-ALL_OBJ=$(NSD_OBJ) nsd-checkconf.o nsd-checkzone.o nsd-control.o nsd-mem.o xfr-inspect.o
++FUZZ_OBJ=fuzzer.o covbridge-coverage.o covbridge-snapshot.o covbridge-libfuzzer.o
++NSD_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) difffile.o ipc.o mini_event.o netio.o nsd.o server.o dbaccess.o dbcreate.o zonec.o verify.o $(FUZZ_OBJ)
++ALL_OBJ=$(filter-out $(FUZZ_OBJ),$(NSD_OBJ) nsd-checkconf.o nsd-checkzone.o nsd-control.o nsd-mem.o xfr-inspect.o)
+ NSD_CHECKCONF_OBJ=$(COMMON_OBJ) nsd-checkconf.o
+-NSD_CHECKZONE_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o server.o zonec.o nsd-checkzone.o verify.o fuzzer.o
++NSD_CHECKZONE_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o server.o zonec.o nsd-checkzone.o verify.o $(FUZZ_OBJ)
+ NSD_CONTROL_OBJ=$(COMMON_OBJ) nsd-control.o
+ CUTEST_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o server.o verify.o zonec.o cutest_dname.o cutest_dns.o cutest_iterated_hash.o cutest_run.o cutest_radtree.o cutest_rbtree.o cutest_namedb.o cutest_options.o cutest_region.o cutest_rrl.o cutest_udb.o cutest_util.o cutest_xfrd_tcp.o cutest_bitset.o cutest_popen3.o cutest_iter.o cutest_event.o cutest.o qtest.o
+ NSD_MEM_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o verify.o server.o zonec.o nsd-mem.o
+ 
+ FUZZ_LIB=$(shell $(CC) -print-file-name=libclang_rt.fuzzer_no_main.a)
++FUZZ_WRAP=-Wl,--wrap=__sanitizer_cov_trace_pc_guard -Wl,--wrap=__sanitizer_cov_trace_pc_guard_init
++FUZZER_CFLAGS=$(filter-out -fsanitize-coverage=trace-pc-guard,$(CFLAGS))
++COVBRIDGE_CFLAGS=$(filter-out -fsanitize=fuzzer-no-link -fsanitize-coverage=% -Wdeclaration-after-statement,$(CFLAGS))
+ 
+ .PHONY: all html
+ 
+@@ -141,7 +145,17 @@ html: doc/manual/conf.py doc/manual/manpages/nsd.conf.5.html doc/manual/manpages
+ $(ALL_OBJ):
+ 	$(COMPILE) -c $<
+ 
+-fuzzer.o: $(srcdir)/fuzzer.c $(srcdir)/fuzzer.h
++fuzzer.o: $(srcdir)/fuzzer.c $(srcdir)/fuzzer.h $(srcdir)/coverbridge/covbridge.h
++	$(CC) $(CPPFLAGS) $(FUZZER_CFLAGS) -c $<
++
++covbridge-coverage.o: $(srcdir)/coverbridge/coverage_guard.c $(srcdir)/coverbridge/covbridge.h
++	$(CC) $(CPPFLAGS) $(COVBRIDGE_CFLAGS) -I$(srcdir)/coverbridge -c $< -o $@
++
++covbridge-snapshot.o: $(srcdir)/coverbridge/snapshot.c $(srcdir)/coverbridge/covbridge.h
++	$(CC) $(CPPFLAGS) $(COVBRIDGE_CFLAGS) -I$(srcdir)/coverbridge -c $< -o $@
++
++covbridge-libfuzzer.o: $(srcdir)/coverbridge/libfuzzer.c $(srcdir)/coverbridge/covbridge.h
++	$(CC) $(CPPFLAGS) $(COVBRIDGE_CFLAGS) -I$(srcdir)/coverbridge -c $< -o $@
+ 
+ nsd-control-setup.sh:	$(srcdir)/nsd-control-setup.sh.in config.h
+ 	rm -f nsd-control-setup.sh
+@@ -219,13 +233,13 @@ simdzone/libzone.a:
+ simdzone/include/zone/export.h: simdzone/libzone.a
+ 
+ nsd:	simdzone/libzone.a $(NSD_OBJ) $(LIBOBJS) $(FUZZ_LIB)
+-	$(LINK) -o $@ $(NSD_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
++	$(LINK) $(FUZZ_WRAP) -o $@ $(NSD_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
+ 
+ nsd-checkconf:	simdzone/libzone.a $(NSD_CHECKCONF_OBJ) $(LIBOBJS)
+ 	$(LINK) -o $@ $(NSD_CHECKCONF_OBJ) simdzone/libzone.a $(LIBOBJS) $(SSL_LIBS) $(LIBS)
+ 
+ nsd-checkzone:	simdzone/libzone.a $(NSD_CHECKZONE_OBJ) $(LIBOBJS) $(FUZZ_LIB)
+-	$(LINK) -o $@ $(NSD_CHECKZONE_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
++	$(LINK) $(FUZZ_WRAP) -o $@ $(NSD_CHECKZONE_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
+ 
+ nsd-control:	simdzone/libzone.a $(NSD_CONTROL_OBJ) $(LIBOBJS)
+ 	$(LINK) -o $@ $(NSD_CONTROL_OBJ) $(LIBOBJS) simdzone/libzone.a $(SSL_LIBS) $(LIBS)
+diff --git a/nsd.c b/nsd.c
+index 7284a69..77a5166 100644
+--- a/nsd.c
++++ b/nsd.c
+@@ -1741,6 +1741,10 @@ main(int argc, char *argv[])
+ 		/* close zonelistfile in non-xfrd processes */
+ 		zone_list_close(nsd.options);
+ 	}
++	if(getenv("NSD_FUZZ_COVERBRIDGE") && nsd.child_count != 1)
++		error("CoverBridge fuzzing requires server-count 1");
++	if(fuzzerInitialize() != 0)
++		error("could not initialize fuzzer coverage: %s", strerror(errno));
+ 	if (server_prepare(&nsd) != 0) {
+ 		unlinkpid(nsd.pidfile, nsd.username);
+ 		error("server preparation failed, %s could "
+@@ -1771,6 +1775,7 @@ main(int argc, char *argv[])
+ 			nsd.signal_hint_quit = 1;
+ 		}
+ 		launchFuzzer();
++		fuzzerWorkerWait();
+ 	}
+ 
+ 	if (nsd.server_kind == NSD_SERVER_MAIN) {
+diff --git a/server.c b/server.c
+index 01970de..f6f02a5 100644
+--- a/server.c
++++ b/server.c
+@@ -282,8 +282,6 @@ struct tcp_handler_data
+ 	 * The number of queries handled by this specific TCP connection.
+ 	 */
+ 	int					query_count;
+-	int					fuzz_query_pending;
+-	
+ 	/*
+ 	 * The timeout in msec for this tcp connection
+ 	 */
+@@ -528,6 +526,7 @@ restart_child_servers(struct nsd *nsd, region_type* region, netio_type* netio,
+ 				if (fcntl(nsd->this_child->parent_fd, F_SETFL, O_NONBLOCK) == -1) {
+ 					log_msg(LOG_ERR, "cannot fcntl pipe: %s", strerror(errno));
+ 				}
++				fuzzerWorkerWait();
+ 				server_child(nsd);
+ 				/* NOTREACH */
+ 				exit(0);
+@@ -2839,6 +2838,8 @@ server_main(struct nsd *nsd)
+ 		send_children_quit(nsd);
+ 		exit(1);
+ 	}
++	if(getenv("NSD_FUZZ_COVERBRIDGE"))
++		launchFuzzer();
+ 	reload_listener.fd = -1;
+ 
+ 	/* This_child MUST be 0, because this is the parent process */
+@@ -2861,6 +2862,12 @@ server_main(struct nsd *nsd)
+ 						nsd->children[is_child].has_exited = 1;
+ 					parent_check_all_children_exited(nsd);
+ 				} else if(is_child != -1) {
++					if(getenv("NSD_FUZZ_COVERBRIDGE")) {
++						log_msg(LOG_ERR,
++						       "fuzzing server %d died with status %d",
++						       (int) child_pid, status);
++						abort();
++					}
+ 					log_msg(LOG_WARNING,
+ 					       "server %d died unexpectedly with status %d, restarting",
+ 					       (int) child_pid, status);
+@@ -2965,6 +2972,10 @@ server_main(struct nsd *nsd)
+ 				}
+ 			}
+ 			if(nsd->restart_children) {
++				if(getenv("NSD_FUZZ_COVERBRIDGE")) {
++					log_msg(LOG_ERR, "fuzzing server died unexpectedly");
++					abort();
++				}
+ 				restart_child_servers(nsd, server_region, netio,
+ 					&nsd->xfrd_listener->fd);
+ 				nsd->restart_children = 0;
+@@ -3018,6 +3029,10 @@ server_main(struct nsd *nsd)
+ 		case NSD_RELOAD:
+ 			/* Continue to run nsd after reload */
+ 			nsd->mode = NSD_RUN;
++			if(getenv("NSD_FUZZ_COVERBRIDGE")) {
++				log_msg(LOG_WARNING, "reload ignored while fuzzing");
++				break;
++			}
+ 			DEBUG(DEBUG_IPC,1, (LOG_INFO, "reloading..."));
+ 			if (reload_pid != -1) {
+ 				log_msg(LOG_WARNING, "Reload already in progress (pid = %d)",
+@@ -4329,7 +4344,6 @@ handle_udp(int fd, short event, void* arg)
+ 		swap_drop:
+ 			STATUP(data->nsd, dropped);
+ 			ZTATUP(data->nsd, q->zone, dropped);
+-			fuzzerPacketProcessed();
+ 			if(i != recvcount-1) {
+ 				/* swap with last and decrease recvcount */
+ 				struct mmsghdr mtmp = msgs[i];
+@@ -4414,8 +4428,8 @@ handle_udp(int fd, short event, void* arg)
+ 		query_reset(queries[i], UDP_MAX_MESSAGE_LEN, 0);
+ 		iovecs[i].iov_len = buffer_remaining(queries[i]->packet);
+ 		msgs[i].msg_hdr.msg_namelen = queries[i]->remote_addrlen;
+-		fuzzerPacketProcessed();
+ 	}
++	fuzzerPacketProcessed();
+ }
+ 
+ #ifdef HAVE_SSL
+@@ -4446,8 +4460,6 @@ tcp_handler_setup_event(struct tcp_handler_data* data, void (*fn)(int, short, vo
+ static void
+ cleanup_tcp_handler(struct tcp_handler_data* data)
+ {
+-	int fuzz_query_pending = data->fuzz_query_pending;
+-
+ 	event_del(&data->event);
+ #ifdef HAVE_SSL
+ 	if(data->tls) {
+@@ -4485,8 +4497,7 @@ cleanup_tcp_handler(struct tcp_handler_data* data)
+ 	assert(data->nsd->current_tcp_count >= 0);
+ 
+ 	region_destroy(data->region);
+-	if(fuzz_query_pending)
+-		fuzzerPacketProcessed();
++	fuzzerPacketProcessed();
+ }
+ 
+ /* Read more data into the buffer for tcp read. Pass the amount of additional
+@@ -4722,8 +4733,6 @@ handle_tcp_reading(int fd, short event, void* arg)
+ 
+ 	/* tcp-query-count: handle query counter ++ */
+ 	data->query_count++;
+-	data->fuzz_query_pending = 1;
+-
+ 	buffer_flip(data->query->packet);
+ #ifdef USE_DNSTAP
+ 	/*
+@@ -4994,8 +5003,6 @@ handle_tcp_writing(int fd, short event, void* arg)
+ 		log_msg(LOG_ERR, "event base set tcpw failed");
+ 	if(event_add(&data->event, &timeout) != 0)
+ 		log_msg(LOG_ERR, "event add tcpw failed");
+-	data->fuzz_query_pending = 0;
+-	fuzzerPacketProcessed();
+ }
+ 
+ #ifdef HAVE_SSL
+@@ -5340,8 +5347,6 @@ handle_tls_reading(int fd, short event, void* arg)
+ 
+ 	/* tcp-query-count: handle query counter ++ */
+ 	data->query_count++;
+-	data->fuzz_query_pending = 1;
+-
+ 	buffer_flip(data->query->packet);
+ #ifdef USE_DNSTAP
+ 	/*
+@@ -5569,8 +5574,6 @@ handle_tls_writing(int fd, short event, void* arg)
+ 	data->query_needs_reset = 1;
+ 
+ 	tcp_handler_setup_event(data, handle_tls_reading, fd, EV_PERSIST | EV_READ | EV_TIMEOUT);
+-	data->fuzz_query_pending = 0;
+-	fuzzerPacketProcessed();
+ }
+ #endif
+ 
+@@ -5710,7 +5713,6 @@ handle_tcp_accept(int fd, short event, void* arg)
+ 
+ 	tcp_data->query_state = QUERY_PROCESSED;
+ 	tcp_data->bytes_transmitted = 0;
+-	tcp_data->fuzz_query_pending = 0;
+ 	memcpy(&tcp_data->query->remote_addr, &addr, addrlen);
+ 	tcp_data->query->remote_addrlen = addrlen;
+ 	/* Copy remote_address to client_address.

@@ -1,0 +1,245 @@
+diff --git a/nsd.c b/nsd.c
+index b8bc1ea..7284a69 100644
+--- a/nsd.c
++++ b/nsd.c
+@@ -7,6 +7,7 @@
+  *
+  */
+ 
++#include "fuzzer.h"
+ #include "config.h"
+ 
+ #include <sys/types.h>
+@@ -858,6 +859,7 @@ main(int argc, char *argv[])
+ {
+ 	/* Scratch variables... */
+ 	int c;
++	int fuzz_single_process;
+ 	pid_t	oldpid;
+ 	size_t i;
+ 	struct sigaction action;
+@@ -875,6 +877,8 @@ main(int argc, char *argv[])
+ 
+ 	char* argv0 = (argv0 = strrchr(argv[0], '/')) ? argv0 + 1 : argv[0];
+ 
++	fuzz_single_process = getenv("NSD_FUZZ_SINGLE_PROCESS") != NULL;
++
+ 	log_init(argv0);
+ 
+ 	/* Initialize the server handler... */
+@@ -1410,6 +1414,8 @@ main(int argc, char *argv[])
+ 				nsd.log_filename, strerror(errno)));
+ 	}
+ 	log_msg(LOG_NOTICE, "%s starting (%s)", argv0, PACKAGE_STRING);
++	if(fuzz_single_process)
++		log_msg(LOG_NOTICE, "fuzz single-process mode enabled");
+ 
+ 	/* Do we have a running nsd? */
+ 	/* When there is a username configured, we assume that due to
+@@ -1530,7 +1536,7 @@ main(int argc, char *argv[])
+ #endif /* HAVE_SSL */
+ 
+ 	/* Unless we're debugging, fork... */
+-	if (!nsd.debug) {
++	if (!nsd.debug && !fuzz_single_process) {
+ 		int fd;
+ 
+ 		/* Take off... */
+@@ -1721,24 +1727,26 @@ main(int argc, char *argv[])
+ #endif /* BIND8_STATS */
+ 	if(nsd.server_kind == NSD_SERVER_MAIN) {
+ 		server_prepare_xfrd(&nsd);
+-		/* xfrd forks this before reading database, so it does not get
+-		 * the memory size of the database */
+-		server_start_xfrd(&nsd, 0, 0);
+-		/* close zonelistfile in non-xfrd processes */
+-		zone_list_close(nsd.options);
++		if(!fuzz_single_process) {
++			/* xfrd forks this before reading database, so it does not get
++			 * the memory size of the database */
++			server_start_xfrd(&nsd, 0, 0);
+ #ifdef USE_DNSTAP
+-		if(nsd.options->dnstap_enable) {
+-			nsd.dt_collector = dt_collector_create(&nsd);
+-			dt_collector_start(nsd.dt_collector, &nsd);
+-		}
++			if(nsd.options->dnstap_enable) {
++				nsd.dt_collector = dt_collector_create(&nsd);
++				dt_collector_start(nsd.dt_collector, &nsd);
++			}
+ #endif /* USE_DNSTAP */
++		}
++		/* close zonelistfile in non-xfrd processes */
++		zone_list_close(nsd.options);
+ 	}
+ 	if (server_prepare(&nsd) != 0) {
+ 		unlinkpid(nsd.pidfile, nsd.username);
+ 		error("server preparation failed, %s could "
+ 			"not be started", argv0);
+ 	}
+-	if(nsd.server_kind == NSD_SERVER_MAIN) {
++	if(nsd.server_kind == NSD_SERVER_MAIN && !fuzz_single_process) {
+ 		server_send_soa_xfrd(&nsd, 0);
+ 	}
+ 
+@@ -1746,6 +1754,25 @@ main(int argc, char *argv[])
+ 	log_msg(LOG_NOTICE, "%s started (%s), pid %d",
+ 		argv0, PACKAGE_STRING, (int) nsd.pid);
+ 
++	if(fuzz_single_process) {
++		for(i = 0; i < 2 * nsd.child_count; i++) {
++			if(nsd.serve2xfrd_fd_recv[i] != -1)
++				close(nsd.serve2xfrd_fd_recv[i]);
++			if(nsd.serve2xfrd_fd_send[i] != -1)
++				close(nsd.serve2xfrd_fd_send[i]);
++			nsd.serve2xfrd_fd_recv[i] = -1;
++			nsd.serve2xfrd_fd_send[i] = -1;
++		}
++		nsd.server_kind = NSD_SERVER_BOTH;
++		nsd.this_child = &nsd.children[0];
++		nsd.this_child->child_num = 0;
++		if(nsd.signal_hint_shutdown) {
++			nsd.signal_hint_shutdown = 0;
++			nsd.signal_hint_quit = 1;
++		}
++		launchFuzzer();
++	}
++
+ 	if (nsd.server_kind == NSD_SERVER_MAIN) {
+ 		server_main(&nsd);
+ 	} else {
+diff --git a/server.c b/server.c
+index 10f4096..01970de 100644
+--- a/server.c
++++ b/server.c
+@@ -282,6 +282,7 @@ struct tcp_handler_data
+ 	 * The number of queries handled by this specific TCP connection.
+ 	 */
+ 	int					query_count;
++	int					fuzz_query_pending;
+ 	
+ 	/*
+ 	 * The timeout in msec for this tcp connection
+@@ -504,7 +505,6 @@ restart_child_servers(struct nsd *nsd, region_type* region, netio_type* netio,
+ 				nsd->children[i].handler->fd = nsd->children[i].child_fd;
+ 				break;
+ 			case 0: /* CHILD */
+-				launchFuzzer();
+ #ifdef MEMCLEAN /* OS collects memory pages */
+ 				region_destroy(region);
+ #endif
+@@ -1618,6 +1618,22 @@ server_shutdown(struct nsd *nsd)
+ {
+ 	size_t i;
+ 
++	if(getenv("NSD_FUZZ_SINGLE_PROCESS")) {
++		unlinkpid(nsd->pidfile, nsd->username);
++		if(nsd->task[0])
++			unlink(nsd->task[0]->fname);
++		if(nsd->task[1])
++			unlink(nsd->task[1]->fname);
++#ifdef USE_ZONE_STATS
++		unlink(nsd->zonestatfname[0]);
++		unlink(nsd->zonestatfname[1]);
++#endif
++#ifdef BIND8_STATS
++		server_stat_free(nsd);
++#endif
++		xfrd_del_tempdir(nsd);
++	}
++
+ 	server_close_all_sockets(nsd->udp, nsd->ifs);
+ 	server_close_all_sockets(nsd->tcp, nsd->ifs);
+ 	/* CHILD: close command channel to parent */
+@@ -4313,6 +4329,7 @@ handle_udp(int fd, short event, void* arg)
+ 		swap_drop:
+ 			STATUP(data->nsd, dropped);
+ 			ZTATUP(data->nsd, q->zone, dropped);
++			fuzzerPacketProcessed();
+ 			if(i != recvcount-1) {
+ 				/* swap with last and decrease recvcount */
+ 				struct mmsghdr mtmp = msgs[i];
+@@ -4397,6 +4414,7 @@ handle_udp(int fd, short event, void* arg)
+ 		query_reset(queries[i], UDP_MAX_MESSAGE_LEN, 0);
+ 		iovecs[i].iov_len = buffer_remaining(queries[i]->packet);
+ 		msgs[i].msg_hdr.msg_namelen = queries[i]->remote_addrlen;
++		fuzzerPacketProcessed();
+ 	}
+ }
+ 
+@@ -4428,6 +4446,8 @@ tcp_handler_setup_event(struct tcp_handler_data* data, void (*fn)(int, short, vo
+ static void
+ cleanup_tcp_handler(struct tcp_handler_data* data)
+ {
++	int fuzz_query_pending = data->fuzz_query_pending;
++
+ 	event_del(&data->event);
+ #ifdef HAVE_SSL
+ 	if(data->tls) {
+@@ -4465,6 +4485,8 @@ cleanup_tcp_handler(struct tcp_handler_data* data)
+ 	assert(data->nsd->current_tcp_count >= 0);
+ 
+ 	region_destroy(data->region);
++	if(fuzz_query_pending)
++		fuzzerPacketProcessed();
+ }
+ 
+ /* Read more data into the buffer for tcp read. Pass the amount of additional
+@@ -4700,6 +4722,7 @@ handle_tcp_reading(int fd, short event, void* arg)
+ 
+ 	/* tcp-query-count: handle query counter ++ */
+ 	data->query_count++;
++	data->fuzz_query_pending = 1;
+ 
+ 	buffer_flip(data->query->packet);
+ #ifdef USE_DNSTAP
+@@ -4946,7 +4969,6 @@ handle_tcp_writing(int fd, short event, void* arg)
+ 			return;
+ 		}
+ 	}
+-
+ 	/*
+ 	 * Done sending, wait for the next request to arrive on the
+ 	 * TCP socket by installing the TCP read handler.
+@@ -4972,6 +4994,8 @@ handle_tcp_writing(int fd, short event, void* arg)
+ 		log_msg(LOG_ERR, "event base set tcpw failed");
+ 	if(event_add(&data->event, &timeout) != 0)
+ 		log_msg(LOG_ERR, "event add tcpw failed");
++	data->fuzz_query_pending = 0;
++	fuzzerPacketProcessed();
+ }
+ 
+ #ifdef HAVE_SSL
+@@ -5316,6 +5340,7 @@ handle_tls_reading(int fd, short event, void* arg)
+ 
+ 	/* tcp-query-count: handle query counter ++ */
+ 	data->query_count++;
++	data->fuzz_query_pending = 1;
+ 
+ 	buffer_flip(data->query->packet);
+ #ifdef USE_DNSTAP
+@@ -5529,7 +5554,6 @@ handle_tls_writing(int fd, short event, void* arg)
+ 			return;
+ 		}
+ 	}
+-
+ 	/*
+ 	 * Done sending, wait for the next request to arrive on the
+ 	 * TCP socket by installing the TCP read handler.
+@@ -5545,6 +5569,8 @@ handle_tls_writing(int fd, short event, void* arg)
+ 	data->query_needs_reset = 1;
+ 
+ 	tcp_handler_setup_event(data, handle_tls_reading, fd, EV_PERSIST | EV_READ | EV_TIMEOUT);
++	data->fuzz_query_pending = 0;
++	fuzzerPacketProcessed();
+ }
+ #endif
+ 
+@@ -5684,6 +5710,7 @@ handle_tcp_accept(int fd, short event, void* arg)
+ 
+ 	tcp_data->query_state = QUERY_PROCESSED;
+ 	tcp_data->bytes_transmitted = 0;
++	tcp_data->fuzz_query_pending = 0;
+ 	memcpy(&tcp_data->query->remote_addr, &addr, addrlen);
+ 	tcp_data->query->remote_addrlen = addrlen;
+ 	/* Copy remote_address to client_address.

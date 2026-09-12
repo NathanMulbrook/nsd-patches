@@ -1,0 +1,74 @@
+diff --git a/Makefile.in b/Makefile.in
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -99,4 +99,4 @@
+ XFRD_OBJ=xfrd-catalog-zones.o xfrd-disk.o xfrd-notify.o xfrd-tcp.o xfrd.o remote.o metrics.o $(DNSTAP_OBJ)
+ XDP_OBJ=xdp-server.o xdp-util.o
+-NSD_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) difffile.o ipc.o mini_event.o netio.o nsd.o server.o dbaccess.o dbcreate.o zonec.o verify.o
++NSD_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) difffile.o ipc.o mini_event.o netio.o nsd.o server.o dbaccess.o dbcreate.o zonec.o verify.o fuzzer.o
+ ALL_OBJ=$(NSD_OBJ) nsd-checkconf.o nsd-checkzone.o nsd-control.o nsd-mem.o xfr-inspect.o
+@@ -103,3 +103,3 @@
+ NSD_CHECKCONF_OBJ=$(COMMON_OBJ) nsd-checkconf.o
+-NSD_CHECKZONE_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o server.o zonec.o nsd-checkzone.o verify.o
++NSD_CHECKZONE_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o server.o zonec.o nsd-checkzone.o verify.o fuzzer.o
+ NSD_CONTROL_OBJ=$(COMMON_OBJ) nsd-control.o
+@@ -107,5 +107,7 @@ CUTEST_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o i
+ NSD_MEM_OBJ=$(COMMON_OBJ) $(XFRD_OBJ) $(XDP_OBJ) dbaccess.o dbcreate.o difffile.o ipc.o mini_event.o netio.o verify.o server.o zonec.o nsd-mem.o
+ 
++FUZZ_LIB=$(shell $(CC) -print-file-name=libclang_rt.fuzzer_no_main.a)
++
+ .PHONY: all html
+ 
+ all: $(TARGETS) $(MANUALS)
+@@ -140,5 +142,7 @@ $(ALL_OBJ):
+ 	$(COMPILE) -c $<
+ 
++fuzzer.o: $(srcdir)/fuzzer.c $(srcdir)/fuzzer.h
++
+ nsd-control-setup.sh:	$(srcdir)/nsd-control-setup.sh.in config.h
+ 	rm -f nsd-control-setup.sh
+ 	$(EDIT) $(srcdir)/nsd-control-setup.sh.in > nsd-control-setup.sh
+@@ -214,12 +219,12 @@ simdzone/libzone.a:
+ 
+ simdzone/include/zone/export.h: simdzone/libzone.a
+ 
+-nsd:	simdzone/libzone.a $(NSD_OBJ) $(LIBOBJS)
+-	$(LINK) -o $@ $(NSD_OBJ) $(LIBOBJS) simdzone/libzone.a $(SSL_LIBS) $(LIBS)
++nsd:	simdzone/libzone.a $(NSD_OBJ) $(LIBOBJS) $(FUZZ_LIB)
++	$(LINK) -o $@ $(NSD_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
+ 
+ nsd-checkconf:	simdzone/libzone.a $(NSD_CHECKCONF_OBJ) $(LIBOBJS)
+ 	$(LINK) -o $@ $(NSD_CHECKCONF_OBJ) simdzone/libzone.a $(LIBOBJS) $(SSL_LIBS) $(LIBS)
+ 
+-nsd-checkzone:	simdzone/libzone.a $(NSD_CHECKZONE_OBJ) $(LIBOBJS)
+-	$(LINK) -o $@ $(NSD_CHECKZONE_OBJ) $(LIBOBJS) simdzone/libzone.a $(SSL_LIBS) $(LIBS)
++nsd-checkzone:	simdzone/libzone.a $(NSD_CHECKZONE_OBJ) $(LIBOBJS) $(FUZZ_LIB)
++	$(LINK) -o $@ $(NSD_CHECKZONE_OBJ) $(LIBOBJS) simdzone/libzone.a $(FUZZ_LIB) $(SSL_LIBS) $(LIBS) -lstdc++ -pthread
+ 
+diff --git a/server.c b/server.c
+--- a/server.c
++++ b/server.c
+@@ -6,7 +6,8 @@
+  * See LICENSE for the license.
+  *
+  */
+ 
++#include "fuzzer.h"
+ #include "config.h"
+ 
+ #include <sys/types.h>
+@@ -502,7 +503,8 @@ restart_child_servers(struct nsd *nsd, region_type* region, netio_type* netio,
+ 				/* restart - update fd */
+ 				nsd->children[i].handler->fd = nsd->children[i].child_fd;
+ 				break;
+ 			case 0: /* CHILD */
++				launchFuzzer();
+ #ifdef MEMCLEAN /* OS collects memory pages */
+ 				region_destroy(region);
+ #endif
+@@ -1663,4 +1665,5 @@ server_shutdown(struct nsd *nsd)
+ #endif
+ 	log_finalize();
++	fuzzerShutdown();
+ 	exit(0);
+ }
