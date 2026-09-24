@@ -148,6 +148,19 @@ index 01970de..f6f02a5 100644
  			DEBUG(DEBUG_IPC,1, (LOG_INFO, "reloading..."));
  			if (reload_pid != -1) {
  				log_msg(LOG_WARNING, "Reload already in progress (pid = %d)",
+@@ -3818,11 +3833,12 @@ server_child(struct nsd *nsd)
+ 		else if(mode == NSD_RUN) {
+ 			/* Wait for a query... */
+ 			if(event_base_loop(event_base, EVLOOP_ONCE) == -1) {
+ 				if (errno != EINTR) {
+ 					log_msg(LOG_ERR, "dispatch failed: %s", strerror(errno));
+ 					break;
+ 				}
+ 			}
++			fuzzerWorkerCheckpoint();
+ 		} else if(mode == NSD_QUIT) {
+ 			/* ignore here, quit */
+ 		} else {
 @@ -4329,7 +4344,6 @@ handle_udp(int fd, short event, void* arg)
  		swap_drop:
  			STATUP(data->nsd, dropped);
